@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: goexpert-deployment
+  labels:
+    app: goexpert
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: goexpert
+  template:
+    metadata:
+      labels:
+        app: goexpert
+    spec:
+      containers:
+      - name: goexpert
+        image: goexpert/backend:latest
+        env:
+        - name: "PORT"
+          value: "5000"
+        - name: "BACKEND_HOST_ADDRESS"
+          value: "https://service.goexpert-uat.willd.link"
+        - name: "CONNECTION_STRING"
+          value: "mongodb+srv://<username>:<password>@cluster0.0cd4h.mongodb.net/goexpert?retryWrites=true&w=majority"
+        - name: "JWT_SECRET"
+          value: "<jwt_secret>"
+        - name: "JWT_EXPIRES_IN"
+          value: "1d"
+        - name: "SENDGRID_API_KEY"
+          value: "<sendgrid_api_key>"
+        - name: "SENDER_EMAIL"
+          value: "goexpert.au@gmail.com"
+        - name: "NODE_ENV"
+          value: "UAT"
+        - name: "UAT_API_URL"
+          value: "https://service.goexpert-uat.willd.link"
+        - name: "PRODUCTON_API_URL"
+          value: "https://service.goexpert-uat.willd.link"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: goexpert-service
+spec:
+  type: NodePort
+  selector:
+    app: goexpert
+  ports:
+    - port: 80
+      targetPort: 5000

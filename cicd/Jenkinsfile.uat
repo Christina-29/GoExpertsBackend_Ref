@@ -1,0 +1,121 @@
+pipeline {
+    agent any
+    environment {
+        ENVIRONMENT = 'UAT'
+        BRANCH = 'master'
+        REPO = 'goexpert/backend'
+        TAG = "${ENVIRONMENT}-${env.BUILD_ID}"
+        IMAGE = "${REPO}:${TAG}"
+        PROJECT_ID = 'goexpert-jr'
+        CLUSTER_NAME = 'goexpert-cluster'
+        LOCATION = 'australia-southeast1-a'
+        CREDENTIALS_DOCKERHUB_ID = 'goexpert_dockerhub'
+        CREDENTIALS_GKE_ID = 'goexpert-gke'
+        CREDENTIALS_MONGO_ID = 'goexpert_mongo'
+        CREDENTIALS_ECR_ID = 'aws_ecr'
+        CREDENTIALS_ECS_ID = 'AWS_ECS'
+
+        // For AWS ECS
+        AWS_ECR_REGION = 'ap-southeast-2'
+        AWS_ECS_SERVICE = 'goexpert-uat-service'
+        AWS_ECS_CLUSTER = 'goexpert-uat-cluster'
+    }
+    options {
+        disableConcurrentBuilds()
+        durabilityHint('PERFORMANCE_OPTIMIZED') //MAX_SURVIVABILITY or SURVIVABLE_NONATOMIC
+    }
+
+    stages {
+        stage("Run test") {
+            agent {
+                docker { image 'node:14.17.0' }
+            }
+            steps {
+                echo "Running test"
+                sh 'npm install'
+                sh 'npm run test'
+            }
+        }
+
+        stage("Build image") {
+            steps {
+                bitbucketStatusNotify(buildState: 'INPROGRESS')
+                echo "==============Building image=============="
+                script {
+                    myapp = docker.build("${IMAGE}")
+                }
+            }
+        }
+
+        stage("Push image") {
+            steps {
+                script {
+                    echo "==============Pushing image to dockerhub=============="
+                    docker.withRegistry('https://registry.hub.docker.com', env.CREDENTIALS_DOCKERHUB_ID) {
+                            myapp.push("latest")
+                            myapp.push("${TAG}")
+                    }
+                    echo "==============Pushing image to aws ecr =============="
+                    withCredentials([string(credentialsId: 'AWS_REPOSITORY_URL_SECRET', variable: 'AWS_ECR_URL')]){
+                        docker.withRegistry("${AWS_ECR_URL}", "ecr:ap-southeast-2:${CREDENTIALS_ECR_ID}") {
+                            myapp.push("latest")
+                            myapp.push("${TAG}")
+                        }
+
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to GKE') {
+            steps{
+                echo "==============Deploying image to Google Kubernetes Engine=============="
+                sh "sed -i 's/backend:latest/backend:${TAG}/g' cicd/deployment.yaml"
+
+                withCredentials([usernamePassword(credentialsId: env.CREDENTIALS_MONGO_ID, passwordVariable: 'PWD', usernameVariable: 'USR'), 
+                    string(credentialsId: 'goexpert_jwt_secret', variable: 'JWT_SECRET'), 
+                    string(credentialsId: 'goexpert_sendgrid_api_key', variable: 'SENDGRID_API_KEY')]) {
+                    // Peplace the secrets with credentials 
+                    sh "sed -i 's/<username>:<password>/$USR:$PWD/g'  cicd/deployment.yaml"
+                    sh "sed -i 's/<jwt_secret>/$JWT_SECRET/g'  cicd/deployment.yaml"
+                    sh "sed -i 's/<sendgrid_api_key>/$SENDGRID_API_KEY/g'  cicd/deployment.yaml"
+                }
+
+                step([$class: 'KubernetesEngineBuilder', 
+                        projectId: env.PROJECT_ID, 
+                        clusterName: env.CLUSTER_NAME, 
+                        location: env.LOCATION, 
+                        manifestPattern: 'cicd/deployment.yaml', 
+                        credentialsId: env.CREDENTIALS_GKE_ID, 
+                        verifyDeployments: true])
+                
+                sh "rm -rf cicd/deployment.yaml"
+            }            
+        }
+
+        stage('Deploy in ECS') {
+            steps {
+                withAWS(credentials: CREDENTIALS_ECS_ID) {
+                    script {
+                        // AWS CLI must be installed in the Jenkins server first. 
+                        // Below is used to upgrade/replace the existing service, which may be created manually or through terraform.
+                        echo "=========== Upgrade ECS cluster's service state with forceNewDeployment================="
+                        sh("/usr/local/bin/aws ecs update-service --cluster ${AWS_ECS_CLUSTER} --service ${AWS_ECS_SERVICE} --force-new-deployment >/dev/null")
+                    }
+
+                }
+            }
+        }
+
+    }
+    post {
+        success {
+            echo "WELL DONE!"
+            bitbucketStatusNotify(buildState: 'SUCCESSFUL')
+        }
+        failure {
+            echo "FAILED"
+            bitbucketStatusNotify(buildState: 'FAILED')
+        }
+    }
+}
